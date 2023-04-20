@@ -30,7 +30,7 @@ lazy_static! {
     };
 }
 
-fn layout<A>(offset: usize) -> Vec<Member> where A: 'static {
+pub fn layout<A>(offset: usize) -> Vec<Member> where A: 'static {
     println!("layout of {}", core::any::type_name::<A>());
     let f = if let Some(f) = LAYOUTS.lock().unwrap().get(&TypeId::of::<A>()) {
         f.clone()
@@ -40,14 +40,15 @@ fn layout<A>(offset: usize) -> Vec<Member> where A: 'static {
     f(offset)
 }
 
-macro_rules! layout {
+#[macro_export]
+macro_rules! inspect {
     ($ty:ident, [$($mem:ty),*]) => {
         mod $ty {
             use linkme::distributed_slice;
             use crate::repr::{KNOWN, Member, layout};
             use core::any::TypeId;
             #[repr(C)]
-            pub struct Ty($($mem),*);
+            pub struct Ty($(pub $mem),*);
 
             #[distributed_slice(KNOWN)]
             static Lay: (TypeId, fn(offset: usize)->Vec<Member>) = (TypeId::of::<Ty>(), |offset|{
@@ -56,7 +57,7 @@ macro_rules! layout {
                 let mut curr = core::alloc::Layout::from_size_align(0, 1).unwrap();
                 let mut memb_off = 0;
                 let mut i = 0;
-                vec![
+                (vec![
                     $(
                         {
                             let (new_layout, start_offset) = curr.extend(fields[i]).unwrap();
@@ -67,14 +68,14 @@ macro_rules! layout {
                             m
                         }
                     ),*
-                ].concat()
+                ] as Vec<Vec<Member>>).concat()
             });
         }
     }
 }
 
-layout![Bar, [u8, u16]];
-layout![Foo, [usize, crate::repr::Bar::Ty]];
+inspect![Bar, [u8, u16]];
+inspect![Foo, [usize, crate::repr::Bar::Ty]];
 
 mod test {
     use crate::repr::{Repr, layout, Foo};

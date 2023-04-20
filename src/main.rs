@@ -2,6 +2,7 @@
 
 mod tracer;
 mod repr;
+
 use tracer::{Tracer, TracerError};
 use std::rc::Rc;
 use std::collections::HashMap;
@@ -9,37 +10,37 @@ use thiserror::Error;
 
 use yaxpeax_x86::long_mode::{Instruction, Opcode, Operand, MemoryAccessSize, RegSpec};
 
-
-struct Env {
+pub struct Env {
     values: HashMap<String, Item>,
 }
-type Function = dyn Closure<Env, Item>;
+pub type Function = dyn Closure<Env, Item>;
 
-trait Closure<IN, OUT> {
+pub trait Closure<IN, OUT> {
     fn call(&self, _: &mut IN) -> OUT;
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Item(u32);
 
-pub struct One;
-impl Closure<Env, Item> for One {
+
+inspect![One, []];
+impl Closure<Env, Item> for One::Ty {
     fn call(&self, _: &mut Env) -> Item {
         return Item(1);
     }
 }
 
-pub struct Get(String);
-impl Closure<Env, Item> for Get {
+inspect![Get, [String]];
+impl Closure<Env, Item> for Get::Ty {
     fn call(&self, env: &mut Env) -> Item {
         return env.values.get(&self.0).unwrap().clone()
     }
 }
 
-pub struct Add { left: Rc<Function>, right: Rc<Function> }
-impl Closure<Env, Item> for Add {
+inspect![Add, [crate::Rc<crate::Function>, crate::Rc<crate::Function>]];
+impl Closure<Env, Item> for Add::Ty {
     fn call(&self, env: &mut Env) -> Item {
-        return Item(self.left.call(env).0 + self.right.call(env).0)
+        return Item(self.0.call(env).0 + self.1.call(env).0)
     }
 }
 
@@ -82,9 +83,9 @@ impl Witchcraft {
 }
 
 fn main() {
-    let one: Rc<Function> = Rc::new(One);
-    let get: Rc<Function> = Rc::new(Get("a".into()));
-    let add: Box<Function> = Box::new(Add { left: one, right: get });
+    let one: Rc<Function> = Rc::new(One::Ty());
+    let get: Rc<Function> = Rc::new(Get::Ty("a".into()));
+    let add: Box<Function> = Box::new(Add::Ty(one, get));
 
     let mut env = Env {
         values: vec![("a".into(), Item(5))].drain(..).collect()
