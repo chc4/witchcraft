@@ -12,10 +12,11 @@ goblin = "0.4"
 memoffset = "0.8.0"
 lazy_static = "1.4.0"
 linkme = "0.3.9"
+sleigh = { version = "0.1.0", path = "../sleigh" }
+sleigh-sys = { path = "../sleigh-sys" }
+rangemap = "1.5.1"
 
 [dependencies.yaxpeax-x86]
 version = "1.0.4"
 features = ["fmt"]
 path = "../yaxpeax-x86" # FIXME when yax x86 1.1 comes out
-
-

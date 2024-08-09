@@ -11,10 +11,11 @@ pub static KNOWN: [(TypeId, LayoutFn)] = [..];
 pub struct Member {
     offset: usize,
     ty: TypeId,
+    // members might not have a size, if they're DSTs
 }
 
 #[derive(Debug)]
-pub struct Layout(Vec<Member>);
+pub struct Layout(pub Vec<Member>);
 
 pub trait Repr: 'static {
     fn known(&self) -> bool { false }
@@ -26,24 +27,26 @@ type LayoutFn = fn(usize) -> Vec<Member>;
 use std::sync::Mutex;
 lazy_static! {
     static ref LAYOUTS: std::sync::Mutex<std::collections::HashMap<TypeId, LayoutFn>> = {
+        // TODO: sanity check that there are no collisions
         Mutex::new(KNOWN.to_vec().into_iter().collect())
     };
 }
 
-pub fn layout<A>(offset: usize) -> Vec<Member> where A: 'static {
+pub fn layout<A>(offset: usize) -> Vec<Member> where A: 'static + ?Sized {
     println!("layout of {}", core::any::type_name::<A>());
     let f = if let Some(f) = LAYOUTS.lock().unwrap().get(&TypeId::of::<A>()) {
         f.clone()
     } else {
         return vec![Member { offset, ty: TypeId::of::<A>() }]
     };
-    f(offset)
+    dbg!(f(offset))
 }
 
 #[macro_export]
 macro_rules! inspect {
     ($ty:ident, [$($mem:ty),*]) => {
         mod $ty {
+            #![allow(unused_assignments, unused_variables, unused_mut)]
             use linkme::distributed_slice;
             use crate::repr::{KNOWN, Member, layout};
             use core::any::TypeId;
