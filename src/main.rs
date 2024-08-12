@@ -112,6 +112,8 @@ impl PartialEq for Spell {
 impl Eq for Spell {}
 
 struct Witchcraft {
+    /// Varnode token used for serializing memory load/stores
+    stack_space: sleigh::AddrSpace,
     decompiler: Decompiler,
     /// Code rewriting window
     peephole: lru::LruCache<Spell, u8>,
@@ -133,14 +135,41 @@ impl Witchcraft {
 
         let tokens = unsafe { std::slice::from_raw_parts(call as *const u8, sym.st_size as usize) };
         println!("{:x}", call as u64);
+        self.analyze(tokens, call as usize)?;
 
         Ok(f)
     }
 
-    fn simplify(&mut self, inst: sleigh::PCode) -> (Value, Spell) {
+    fn simplify(&mut self, mut inst: sleigh::PCode) -> (Value, Spell) {
         let size_mismatch = inst.vars.iter().any(|var| inst.outvar.as_ref().map(|ourvar| ourvar.size != var.size).unwrap_or(true));
-        'a:  { match (inst.opcode, &inst.vars[..]){
-            (Opcode::Copy, [input]) => {
+        'a:  {
+        match (inst.opcode, &mut inst.vars[..], inst.outvar.as_mut_slice()){
+            (Opcode::Store, [spaceid, ptr, ..], [..]) => {
+                // if the ptr is RSP relative, make it stack relative
+                if let Some(sp) = self.context.get(ptr)
+                    && let Value::Known(slot @ VarnodeData { space, .. }) = &sp.1
+                    && *space == self.stack_space
+                {
+                    // and have it reference stack slots directly
+                    println!(">stack relative store");
+                    inst.outvar = Some(slot.clone());
+                        //panic!()
+                } else {
+                    // tie the outvar to the space we're storing in, which sequences store->loads
+                    inst.outvar = Some(spaceid.clone());
+                }
+            },
+            (Opcode::Load, [spaceid, ptr], [val]) => {
+                if let Some(sp) = self.context.get(ptr)
+                    && let Value::Known(slot @ VarnodeData { space, .. }) = &sp.1
+                    && *space == self.stack_space
+                {
+                    println!(">stack relative load");
+                    // use stack slot directly
+                    *ptr = slot.clone();
+                }
+            },
+            (Opcode::Copy, [input], [output]) => {
                 if size_mismatch { break 'a };
                 if input.space.type_ == SpaceType::Constant {
                     return (Value::Known(input.clone()), Spell { pcode: inst })
@@ -149,14 +178,21 @@ impl Witchcraft {
                     return (exists.1.clone(), exists.2.clone())
                 }
             },
-            (Opcode::IntAdd | Opcode::IntAnd, [left, right])
+            // TODO: add outvar to load/stores so they're materialized correctly
+            (Opcode::IntAdd | Opcode::IntSub | Opcode::IntAnd, [left, right], [out])
                 if right.space.type_ == SpaceType::Constant
             => {
                 if size_mismatch { break 'a };
                 if let Some(left) = self.context.get_mut(left) {
-                    if let Value::Known(lvar) = &mut left.1 && lvar.space.type_ == SpaceType::Constant {
+                    if let Value::Known(lvar) = &mut left.1
+                        && (lvar.space.type_ == SpaceType::Constant || lvar.space == self.stack_space){
+                        if(lvar.space == self.stack_space) {
+                            println!("> update stack");
+                        }
+                        // we can compute a new constant, and rewrite this node to it
                         let const_val = match inst.opcode {
                             Opcode::IntAdd => { lvar.offset + right.offset },
+                            Opcode::IntSub => { lvar.offset - right.offset },
                             Opcode::IntAnd => { (lvar.offset&right.offset) as u64 },
                             _ => panic!(),
                         };
@@ -195,7 +231,10 @@ impl Witchcraft {
         let mut to_materialize = vec![];
         //let mut to_remove = vec![];
         for dep in &spell.pcode.vars {
-            if dep.space.type_ == SpaceType::Constant { continue; }
+            if dep.space.type_ == SpaceType::Constant
+                && !matches!(spell.pcode.opcode, Opcode::Store | Opcode::Load) {
+                    continue;
+            }
             if let Some(computes) = self.context.get_mut(dep) {
                 // track that this spell is a dependant of its inputs
                 computes.3.insert(spell.clone());
@@ -254,10 +293,11 @@ impl Witchcraft {
         let mut tracer = Tracer::new().unwrap();
         let mut off = 0;
         let mut pcode_count = 0;
-        while(off < tokens.len()) {
+        'p: while(off < tokens.len()) {
 
             let pc = (start + off);
             let (len, mut sleigh) = self.decompiler.translate(&tokens[off..], pc as u64);
+            assert!(len != 0);
 
             let instructions = tracer.disassemble(
                 tokens[off..].as_ptr() as *const (), len)?;
@@ -272,7 +312,7 @@ impl Witchcraft {
                             self.pretty(input), self.pretty(output));
                     },
                     // One operand bitwise operations
-                    (sleigh::Opcode::BoolNegate, [var], [out]) => {
+                    (Opcode::BoolNegate, [var], [out]) => {
                         println!("{:?} {} -> {}", inst.opcode,
                             self.pretty(var), self.pretty(out));
                     },
@@ -281,12 +321,17 @@ impl Witchcraft {
                         println!("{:?} {} -> {}", inst.opcode,
                             self.pretty(var), self.pretty(count));
                     },
+                    // Two operand bool operations
+                    (Opcode::BoolOr | Opcode::BoolXor, [left, right], [out]) => {
+                        println!("{:?} {} {} -> {}", inst.opcode,
+                            self.pretty(left), self.pretty(right), self.pretty(out));
+                    }
                     // Two operand numeric operations
-                    (sleigh::Opcode::IntAdd | sleigh::Opcode::IntSub | sleigh::Opcode::IntMult
-                     | sleigh::Opcode::IntLess | sleigh::Opcode::IntSBorrow | sleigh::Opcode::IntCarry
-                     | sleigh::Opcode::IntSCarry
-                     | sleigh::Opcode::IntSLess | sleigh::Opcode::IntEqual
-                     | sleigh::Opcode::IntAnd | sleigh::Opcode::IntOr | sleigh::Opcode::IntXor,
+                    (Opcode::IntAdd | Opcode::IntSub | Opcode::IntMult
+                     | Opcode::IntLess | Opcode::IntSBorrow | Opcode::IntCarry
+                     | Opcode::IntSCarry
+                     | Opcode::IntSLess | Opcode::IntEqual | Opcode::IntNotEqual
+                     | Opcode::IntAnd | Opcode::IntOr | Opcode::IntXor,
                      [left, right], [out]) => {
                         println!("{:?} {} {} -> {}", inst.opcode,
                             self.pretty(left), self.pretty(right), self.pretty(out));
@@ -308,24 +353,30 @@ impl Witchcraft {
                     // Control flow
                     (sleigh::Opcode::CallInd, [ptr], []) => {
                         println!("callind {}", self.pretty(ptr));
+                        break 'p;
                     },
                     (sleigh::Opcode::Call, [target], []) => {
                         println!("call {}", self.pretty(target));
+                        break 'p;
                     },
                     (sleigh::Opcode::CallOther, args, ret) => {
                         println!("callother {:?} {:?}", args, ret);
+                        break 'p;
                     },
                     (sleigh::Opcode::Return, [reg], []) => {
                         println!("return {}", self.pretty(reg));
+                        break 'p;
                     },
                     (sleigh::Opcode::Branch, [target], []) => {
                         println!("branch {}", self.pretty(target));
+                        break 'p;
                     },
                     (sleigh::Opcode::CBranch, [cond, target], []) => {
                         println!("cbranch {} {}",
                             self.pretty(cond),
                             self.pretty(target),
                         );
+                        break 'p;
                     },
                     x => unreachable!("unimplemented pcode op {:?}", x)
                 }
@@ -394,12 +445,29 @@ impl Witchcraft {
 
     fn new() -> Self {
         let mut decompiler = Decompiler::builder().x86(X86Mode::Mode64).build();
+        let stack = decompiler.get_address_space_by_name("stack");
+        let rsp = decompiler.get_register("RSP");
+        let sp = VarnodeData {
+            space: stack.clone(),
+            offset: 0x1_000_000,
+            size: 8,
+        };
+        let stack_op = sleigh::PCode {
+            address: 0,
+            opcode: Opcode::Copy,
+            vars: vec![sp.clone()],
+            outvar: Some(sp.clone()),
+        };
         Self {
+            stack_space: stack,
             decompiler,
             peephole: lru::LruCache::new(std::num::NonZeroUsize::new(32).unwrap()),
             materialize: Vec::new(),
             emitted_code: Default::default(),
-            context: Default::default(),
+            context: vec![
+                (rsp.clone(),
+                    (true, Value::Known(sp), Spell { pcode: stack_op }, Default::default())),
+            ].drain(..).collect(),
         }
     }
 }
@@ -408,17 +476,25 @@ fn main() {
     //let one: Rc<Function> = Rc::new(One::Ty());
     //let inc = Box::new(Inc::Ty(one.clone()));
 
+    //let mut witchcraft = Witchcraft::new();
+    //witchcraft.jit(inc);
     //let mut env = Env {
     //    values: vec![("a".into(), Item::Num(5))].drain(..).collect()
     //};
     //let inc = Witchcraft::speedup(inc).unwrap();
 
     //println!("add: {:?}", inc.call(&mut env));
+    //let testcase = &[
+    //    72, 199, 193, 0, 0, 0, 0, // XOR RCX, RCX
+    //    72, 131, 193, 2, // add rcx, 2
+    //    72, 131, 195, 2, // add rbx, 2
+    //    72, 131, 193, 2, // add rcx, 2
+    //];
     let testcase = &[
-        72, 199, 193, 0, 0, 0, 0, // XOR RCX, RCX
-        72, 131, 193, 2, // add rcx, 2
-        72, 131, 195, 2, // add rbx, 2
-        72, 131, 193, 2, // add rcx, 2
+        72, 199, 195, 0, 0, 0, 0, // MOV RBX, 0
+        83, // push rbx
+        91, // pop rbx
+        72, 131, 195, 2 // ADD RBX, 2
     ];
     let mut witchcraft = Witchcraft::new();
     witchcraft.analyze(testcase, 0);
