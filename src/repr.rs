@@ -7,14 +7,14 @@ use linkme::distributed_slice;
 #[distributed_slice]
 pub static KNOWN: [(TypeId, LayoutFn)] = [..];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Member {
     offset: usize,
     ty: TypeId,
     // members might not have a size, if they're DSTs
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Layout(pub Vec<Member>);
 
 pub trait Repr: 'static {
